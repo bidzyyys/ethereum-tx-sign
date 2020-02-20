@@ -1,9 +1,5 @@
-use ethereum_types::{H160, H256, U256};
+use ethereum_types::{H160, U256};
 use rlp::RlpStream;
-use num_traits::int;
-use secp256k1::key::SecretKey;
-use secp256k1::Message;
-use secp256k1::Secp256k1;
 use tiny_keccak::keccak256;
 
 /// Description of a Transaction, pending or in the chain.
@@ -25,41 +21,39 @@ pub struct RawTransaction {
 }
 
 impl RawTransaction {
-
-        /// Signs and returns the RLP-encoded transaction
-    pub fn sign<T: int::PrimInt>(&self, private_key: &H256, chain_id: &T) -> Vec<u8> {
-        let chain_id_u64: u64 = chain_id.to_u64().unwrap();
-        let hash = self.hash(chain_id_u64);
-        let sig = ecdsa_sign(&hash, &private_key.0, &chain_id_u64);
-        let mut r_n = sig.r;		
-        let mut s_n = sig.s;		
-        while r_n[0] == 0 {		
-            r_n.remove(0);		
-        }		
-        while s_n[0] == 0 {		
-            s_n.remove(0);		
-        }
+    
+    pub fn encode_signed_tx(&self, signature: Vec<u8>, chain_id: u64) -> Vec<u8> {
+        let (sig_v, sig_r, sig_s) = self.prepare_signature(signature, chain_id);
+        
         let mut tx = RlpStream::new();
+        
         tx.begin_unbounded_list();
+        
         self.encode(&mut tx);
-        tx.append(&sig.v);
-        tx.append(&r_n);
-        tx.append(&s_n);
+        tx.append(&sig_v);
+        tx.append(&sig_r);
+        tx.append(&sig_s);
+        
         tx.finalize_unbounded_list();
+        
         tx.out()
     }
 
-    fn hash(&self, chain_id: u64) -> Vec<u8> {
+    pub fn hash(&self, chain_id: u64) -> Vec<u8> {
         let mut hash = RlpStream::new();
+        
         hash.begin_unbounded_list();
+        
         self.encode(&mut hash);
         hash.append(&mut chain_id.clone());
         hash.append(&mut U256::zero());
         hash.append(&mut U256::zero());
+        
         hash.finalize_unbounded_list();
-        keccak256_hash(&hash.out())
+        
+        keccak256(&hash.out()).iter().cloned().collect()
     }
-
+    
     fn encode(&self, s: &mut RlpStream) {
         s.append(&self.nonce);
         s.append(&self.gas_price);
@@ -72,77 +66,31 @@ impl RawTransaction {
         s.append(&self.value);
         s.append(&self.data);
     }
-}
 
-fn keccak256_hash(bytes: &[u8]) -> Vec<u8> {
-    keccak256(bytes).iter().cloned().collect()
-}
+    fn prepare_signature(&self, signature: Vec<u8>, chain_id: u64) -> (u64, Vec<u8>, Vec<u8>) {
+        // TODO ugly solution
+        assert_eq!(signature.len(), 65);
+        
+        let sig_v = signature[0];
+        let sig_v = sig_v as u64 + chain_id * 2 + 35;
+        
+        let mut sig_r = signature.to_owned().split_off(1);
+        let mut sig_s = sig_r.split_off(32);
+        
+        self.prepare_signature_part(&mut sig_r);
+        self.prepare_signature_part(&mut sig_s);
 
-fn ecdsa_sign(hash: &[u8], private_key: &[u8], chain_id: &u64) -> EcdsaSig {
-    let s = Secp256k1::signing_only();
-    let msg = Message::from_slice(hash).unwrap();
-    let key = SecretKey::from_slice(private_key).unwrap();
-    let (v, sig_bytes) = s.sign_recoverable(&msg, &key).serialize_compact();
-
-    EcdsaSig {
-        v: v.to_i32() as u64 + chain_id * 2 + 35,
-        r: sig_bytes[0..32].to_vec(),
-        s: sig_bytes[32..64].to_vec(),
+        (sig_v, sig_r, sig_s)
     }
-}
 
-pub struct EcdsaSig {
-    v: u64,
-    r: Vec<u8>,
-    s: Vec<u8>,
+    fn prepare_signature_part(&self, part: &mut Vec<u8>) {
+        assert_eq!(part.len(), 32);
+        while part[0] == 0 {			
+            part.remove(0);			
+        }
+    }
 }
 
 mod test {
 
-    #[test]
-    fn test_signs_transaction_eth() {
-        use ethereum_types::*;
-        use raw_transaction::RawTransaction;
-        use serde_json;
-        use std::fs::File;
-        use std::io::Read;
-
-        #[derive(Deserialize)]
-        struct Signing {
-            signed: Vec<u8>,
-            private_key: H256,
-        }
-
-        let mut file = File::open("./test/test_txs.json").unwrap();
-        let mut f_string = String::new();
-        file.read_to_string(&mut f_string).unwrap();
-        let txs: Vec<(RawTransaction, Signing)> = serde_json::from_str(&f_string).unwrap();
-        let chain_id = 1 as u64;
-        for (tx, signed) in txs.into_iter() {
-            assert_eq!(signed.signed, tx.sign(&signed.private_key, &chain_id));
-        }
-    }
-
-    #[test]
-    fn test_signs_transaction_ropsten() {
-        use ethereum_types::*;
-        use raw_transaction::RawTransaction;
-        use serde_json;
-        use std::fs::File;
-        use std::io::Read;
-        #[derive(Deserialize)]
-        struct Signing {
-            signed: Vec<u8>,
-            private_key: H256,
-        }
-
-        let mut file = File::open("./test/test_txs_ropsten.json").unwrap();
-        let mut f_string = String::new();
-        file.read_to_string(&mut f_string).unwrap();
-        let txs: Vec<(RawTransaction, Signing)> = serde_json::from_str(&f_string).unwrap();
-        let chain_id = 3 as i32;
-        for (tx, signed) in txs.into_iter() {
-            assert_eq!(signed.signed, tx.sign(&signed.private_key, &chain_id));
-        }
-    }
 }
